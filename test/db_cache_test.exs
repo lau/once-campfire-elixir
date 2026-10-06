@@ -16,6 +16,21 @@ defmodule Campfire.DBCacheTest do
 
   defp generation(table), do: :ets.lookup_element(Campfire.DB.Generations, table, 2, 0)
 
+  test "single-row helpers preserve query errors and recover after the schema is repaired" do
+    sql = "SELECT name FROM missing_table"
+
+    assert {:error, _} = DB.one(sql)
+    assert {:error, _} = DB.cached_one(sql, [], ~w(missing_table))
+
+    assert [] = DB.query("CREATE TABLE missing_table (name TEXT)")
+    assert nil == DB.one(sql)
+    assert nil == DB.cached_one(sql, [], ~w(missing_table))
+
+    assert [] = DB.query("INSERT INTO missing_table (name) VALUES ('recovered')")
+    assert %{"name" => "recovered"} = DB.one(sql)
+    assert %{"name" => "recovered"} = DB.cached_one(sql, [], ~w(missing_table))
+  end
+
   test "a cached read is replaced after a write to its table" do
     assert [%{"name" => "David"}] = DB.cached(@name, [@user], ~w(users))
     DB.query("UPDATE users SET name=? WHERE id=?", ["Dave", @user])

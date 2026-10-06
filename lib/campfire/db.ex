@@ -74,7 +74,7 @@ defmodule Campfire.DB do
     end
   end
 
-  def one(sql, params \\ []), do: List.first(query(sql, params))
+  def one(sql, params \\ []), do: first(query(sql, params))
 
   @doc """
   `query/2` for a read whose rows are kept until one of `tables` (every table it reads) is
@@ -94,7 +94,11 @@ defmodule Campfire.DB do
     end
   end
 
-  def cached_one(sql, params, tables), do: List.first(cached(sql, params, tables))
+  def cached_one(sql, params, tables), do: first(cached(sql, params, tables))
+
+  defp first([]), do: nil
+  defp first([row | _]), do: row
+  defp first({:error, _} = error), do: error
 
   @doc """
   The current generations of `tables` (and of everything). Equal generations mean none of the
@@ -247,11 +251,16 @@ defmodule Campfire.DB do
 
     try do
       :ok = SQL.bind(stmt, params)
-      {:ok, columns} = SQL.columns(db, stmt)
       {:ok, rows} = SQL.fetch_all(db, stmt)
+      # SQLite may reprepare a cached statement while stepping after a schema change.
+      {:ok, columns} = SQL.columns(db, stmt)
+      :ok = SQL.reset(stmt)
       Enum.map(rows, &:maps.from_list(:lists.zip(columns, &1)))
-    after
-      SQL.reset(stmt)
+    catch
+      kind, reason ->
+        :ets.delete(statements, sql)
+        SQL.release(db, stmt)
+        :erlang.raise(kind, reason, __STACKTRACE__)
     end
   end
 
@@ -305,7 +314,9 @@ defmodule Campfire.DB do
     def handle_checkin(:ok, _from, conn, pool_state), do: {:ok, conn, pool_state}
 
     @impl NimblePool
-    def terminate_worker(_reason, {db, _}, pool_state) do
+    def terminate_worker(_reason, {db, statements}, pool_state) do
+      for {_, stmt} <- :ets.tab2list(statements), do: SQL.release(db, stmt)
+      :ets.delete(statements)
       SQL.close(db)
       {:ok, pool_state}
     end
